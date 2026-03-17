@@ -1,6 +1,6 @@
-# OfferHub 系统设计文档 v1.0
+# OfferHub 系统设计文档 v1.1
 
-> 版本：v1.0 | 更新时间：2026-03-17 | 状态：草稿，待讨论
+> 版本：v1.1 | 更新时间：2026-03-17 | 状态：讨论中
 
 ---
 
@@ -13,10 +13,10 @@
 │  客户端层                                                    │
 │  Browser (Next.js SSR/CSR)                                  │
 └──────────────────────────┬──────────────────────────────────┘
-                           │ HTTPS / WebSocket
+                           │ HTTPS
 ┌──────────────────────────▼──────────────────────────────────┐
 │  接入层                                                      │
-│  Nginx  →  API Gateway (路由 / 限流 / 鉴权)                  │
+│  Nginx  →  FastAPI (路由 / 限流 / 鉴权)                      │
 └──────────────────────────┬──────────────────────────────────┘
                            │
           ┌────────────────┼────────────────┐
@@ -28,24 +28,32 @@
          │                │                 │
 ┌────────▼────────────────▼─────────────────▼─────────┐
 │  数据层                                               │
-│  PostgreSQL  │  Redis  │  Elasticsearch  │  OSS      │
+│  PostgreSQL（主库 + 全文搜索）  │  Redis（缓存+队列）  │
 └──────────────────────────────────────────────────────┘
 ```
 
-### 1.2 部署方式
+### 1.2 技术选型决策
 
-MVP 阶段使用 Docker Compose 单机部署，后续按需拆分：
+| 层级 | 技术 | 决策理由 |
+|------|------|----------|
+| 前端 | Next.js 14 + TypeScript + TailwindCSS | SSR 利于 SEO，推广必备 |
+| 后端 | Python FastAPI | 与爬虫/AI 生态契合，开发快 |
+| 爬虫 | Scrapy + aiohttp | 异步高性能采集 |
+| 数据库 | PostgreSQL | 全文搜索（pg_trgm）内置，无需额外组件 |
+| 缓存/队列 | Redis | 热点缓存 + 爬虫任务队列 + URL 去重 |
+| 搜索 | PostgreSQL pg_trgm | MVP 阶段够用，避免引入 ES 的运维复杂度；规模上来后可迁移 |
+| 部署 | Docker Compose 单机 | 32G 内存服务器，单机足够支撑 MVP |
+
+### 1.3 Docker Compose 服务清单
 
 ```yaml
-# docker-compose.yml 服务清单
 services:
-  web:        # Next.js 前端
-  api:        # FastAPI 后端
+  web:        # Next.js 前端（port 3000）
+  api:        # FastAPI 后端（port 8000）
   worker:     # Scrapy 采集 Worker
-  postgres:   # 主数据库
-  redis:      # 缓存 + 队列
-  es:         # Elasticsearch
-  nginx:      # 反向代理
+  postgres:   # PostgreSQL 主库（port 5432）
+  redis:      # Redis 缓存+队列（port 6379）
+  nginx:      # 反向代理（port 80/443）
 ```
 
 ---
@@ -61,7 +69,7 @@ users ──────< articles >────── tags
   │
   └──< user_behaviors (浏览/点赞/收藏) >── articles
 
-sources ──────< crawl_tasks >────── articles
+crawl_sources ──────< crawl_tasks >────── articles
 ```
 
 ### 2.2 核心表结构
@@ -73,7 +81,7 @@ sources ──────< crawl_tasks >────── articles
 | id | UUID PK | 用户ID |
 | username | VARCHAR(50) UNIQUE | 用户名 |
 | email | VARCHAR(255) UNIQUE | 邮箱 |
-| password_hash | VARCHAR(255) | 密码哈希 |
+| password_hash | VARCHAR(255) | 密码哈希（bcrypt） |
 | avatar_url | TEXT | 头像 |
 | role | ENUM(user, editor, admin) | 角色 |
 | points | INT DEFAULT 0 | 积分 |
@@ -85,9 +93,10 @@ sources ──────< crawl_tasks >────── articles
 |------|------|------|
 | id | UUID PK | 内容ID |
 | title | VARCHAR(500) | 标题 |
-| summary | TEXT | 摘要（AI生成或手填） |
+| summary | TEXT | 摘要（正文前 200 字） |
 | content | TEXT | 正文（Markdown） |
-| author_id | UUID FK → users | 作者 |
+| search_vector | TSVECTOR | 全文搜索向量（自动维护） |
+| author_id | UUID FK → users | 作者（采集内容为系统账号） |
 | category | VARCHAR(50) | 一级分类 |
 | sub_category | VARCHAR(50) | 二级分类 |
 | source_type | ENUM(ugc, github, gitee, rss, crawler) | 来源类型 |
@@ -159,14 +168,41 @@ sources ──────< crawl_tasks >────── articles
 ### 2.3 索引策略
 
 ```sql
--- 高频查询索引
+-- 常规查询索引
 CREATE INDEX idx_articles_status_published ON articles(status, published_at DESC);
 CREATE INDEX idx_articles_category ON articles(category, sub_category);
 CREATE INDEX idx_articles_author ON articles(author_id);
 CREATE INDEX idx_article_tags_tag ON article_tags(tag_id);
 
--- 全文搜索走 Elasticsearch，PostgreSQL 不建全文索引
+-- 全文搜索索引（GIN，支持中文分词）
+CREATE INDEX idx_articles_search ON articles USING GIN(search_vector);
+
+-- URL 去重索引
+CREATE UNIQUE INDEX idx_articles_source_url ON articles(source_url)
+    WHERE source_url IS NOT NULL;
 ```
+
+### 2.4 全文搜索向量维护
+
+```sql
+-- 自动更新 search_vector（触发器）
+CREATE OR REPLACE FUNCTION update_search_vector()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.search_vector :=
+    setweight(to_tsvector('simple', coalesce(NEW.title, '')), 'A') ||
+    setweight(to_tsvector('simple', coalesce(NEW.summary, '')), 'B') ||
+    setweight(to_tsvector('simple', coalesce(NEW.content, '')), 'C');
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER articles_search_vector_update
+  BEFORE INSERT OR UPDATE ON articles
+  FOR EACH ROW EXECUTE FUNCTION update_search_vector();
+```
+
+> 中文分词：使用 `zhparser` 扩展（PostgreSQL 中文分词插件），Docker 镜像中预装。
 
 ---
 
@@ -175,7 +211,7 @@ CREATE INDEX idx_article_tags_tag ON article_tags(tag_id);
 ### 3.1 接口规范
 
 - 基础路径：`/api/v1`
-- 认证：JWT Bearer Token
+- 认证：JWT Bearer Token（Access Token 2h + Refresh Token 7d）
 - 响应格式：
 ```json
 {
@@ -194,10 +230,10 @@ CREATE INDEX idx_article_tags_tag ON article_tags(tag_id);
 |------|------|------|------|
 | GET | `/articles` | 文章列表（分页+筛选） | 否 |
 | GET | `/articles/{id}` | 文章详情 | 否 |
-| POST | `/articles` | 发布文章 | 是 |
+| POST | `/articles` | 发布文章（UGC） | 是 |
 | PUT | `/articles/{id}` | 编辑文章 | 是（本人/管理员） |
 | DELETE | `/articles/{id}` | 删除文章 | 是（本人/管理员） |
-| GET | `/articles/search` | 全文搜索 | 否 |
+| GET | `/articles/search` | 全文搜索（pg_trgm） | 否 |
 | POST | `/articles/{id}/like` | 点赞 | 是 |
 | POST | `/articles/{id}/collect` | 收藏 | 是 |
 
@@ -242,8 +278,8 @@ Query Params:
   category    string  一级分类
   sub_cat     string  二级分类
   tag         string  标签名
-  sort        string  latest|hot|recommend  default=recommend
-  keyword     string  关键词（走ES）
+  sort        string  latest|hot|recommend  default=latest
+  keyword     string  关键词（走 pg_trgm 全文搜索）
 
 Response:
 {
@@ -260,6 +296,7 @@ Response:
         "category": "面经分享",
         "tags": ["前端", "字节"],
         "author": { "id": "...", "username": "张三", "avatar": "..." },
+        "source_url": "https://...",
         "view_count": 1200,
         "like_count": 856,
         "published_at": "2026-03-17T10:00:00Z"
@@ -279,63 +316,67 @@ Response:
 定时调度 (APScheduler)
     │
     ▼
-任务队列 (Redis Queue)
+任务队列 (Redis List)
     │
-    ├──→ GitHub Crawler
-    ├──→ Gitee Crawler
-    ├──→ RSS Crawler
-    └──→ Web Crawler
+    ├──→ GitHub Crawler（GitHub MCP API）
+    ├──→ Gitee Crawler（Gitee API）
+    ├──→ RSS Crawler（feedparser）
+    └──→ Web Crawler（Scrapy，谨慎使用）
          │
          ▼
     内容处理管道
-    ├── 去重（Redis BloomFilter）
-    ├── 内容清洗（HTML→Markdown）
-    ├── AI 摘要生成（可选）
-    ├── 自动打标签（分类模型）
-    └── 写入 PostgreSQL + ES 索引
+    ├── URL 去重（Redis SET + DB UNIQUE 索引）
+    ├── 内容清洗（HTML → Markdown）
+    ├── 摘要提取（正文前 200 字）
+    ├── 自动分类打标（关键词匹配规则）
+    └── 写入 PostgreSQL（触发器自动更新 search_vector）
 ```
 
 ### 4.2 GitHub/Gitee 采集
 
 ```python
-# 采集逻辑伪代码
-def crawl_github_repos():
-    # 1. 搜索高Star面试题仓库
-    repos = github_api.search_repos(
+# 采集逻辑（利用 GitHub MCP 工具）
+async def crawl_github_interview_repos():
+    # 1. 搜索高 Star 面试题仓库
+    repos = await github_mcp.search_repos(
         query="interview 面试 面经",
         sort="stars",
-        min_stars=500
+        limit=50
     )
-    
-    # 2. 提取 Markdown 文件
+
     for repo in repos:
-        files = repo.get_markdown_files()
-        for file in files:
-            content = file.get_content()
-            # 3. 解析结构化内容
-            articles = parse_markdown_to_articles(content)
-            # 4. 入库
-            save_with_dedup(articles, source_url=file.html_url)
+        if repo["stars"] < 500:
+            continue
+        # 2. 列出仓库 Markdown 文件
+        contents = await github_mcp.list_repo_contents(
+            repo["owner"], repo["name"]
+        )
+        # 3. 提取并解析内容
+        for file in contents["files"]:
+            if file["name"].endswith(".md"):
+                content = await github_mcp.get_file_content(
+                    repo["owner"], repo["name"], file["path"]
+                )
+                await save_article(content, source=repo["url"])
 ```
 
 **合规配置：**
 ```python
-GITHUB_CRAWLER_CONFIG = {
+CRAWLER_CONFIG = {
     "user_agent": "OfferHub-Bot/1.0 (+https://github.com/wpmdpzch/OfferHub)",
-    "rate_limit": 30,          # GitHub API: 30 req/min (未认证)
-    "rate_limit_auth": 5000,   # 认证后: 5000 req/hour
+    "github_rate_limit": 5000,   # 认证后 5000 req/hour
+    "web_rate_limit": 1,         # 普通网站 1 req/s
+    "random_delay": (1, 3),      # 随机延迟秒数
     "respect_robots": True,
-    "only_public": True,       # 仅采集公开仓库
+    "only_public": True,
 }
 ```
 
-### 4.3 RSS 采集
-
-目标 RSS 源（初始列表）：
+### 4.3 RSS 采集源（初始列表）
 
 | 来源 | RSS URL | 内容类型 |
 |------|---------|----------|
-| 掘金 - 面试 | `https://juejin.cn/rss` | 技术文章 |
+| 掘金 | `https://juejin.cn/rss` | 技术文章 |
 | 阮一峰博客 | `http://www.ruanyifeng.com/blog/atom.xml` | 技术文章 |
 | 美团技术团队 | `https://tech.meituan.com/feed/` | 技术文章 |
 | InfoQ | `https://www.infoq.cn/feed` | 行业资讯 |
@@ -343,92 +384,77 @@ GITHUB_CRAWLER_CONFIG = {
 ### 4.4 去重策略
 
 ```
-URL 去重：Redis SET 存储已采集 URL 的 MD5
-内容去重：SimHash 相似度检测（相似度 > 0.9 则跳过）
-标题去重：Elasticsearch 模糊匹配标题
+1. URL 去重：articles 表 source_url 唯一索引，插入时自动拦截
+2. 内容去重：SimHash 相似度检测（相似度 > 0.9 跳过）
+3. Redis 布隆过滤器：采集前快速预判，减少 DB 查询
 ```
 
 ### 4.5 合规框架
 
 ```python
 class ComplianceMixin:
-    def check_robots(self, url) -> bool:
+    async def check_robots(self, url: str) -> bool:
         """检查 robots.txt 是否允许采集"""
         ...
-    
-    def rate_limit(self, domain):
-        """基于域名的请求频率限制"""
-        # 默认 1 req/s，可配置
+
+    async def rate_limit(self, domain: str):
+        """基于域名的请求频率限制（Redis 令牌桶）"""
         ...
-    
-    def add_source_attribution(self, article):
-        """添加来源标注"""
-        article.source_url = original_url
-        article.source_type = "crawler"
-        ...
+
+    def add_attribution(self, article: dict) -> dict:
+        """添加来源标注，确保原始链接可追溯"""
+        article["source_url"] = self.original_url
+        return article
 ```
 
 ---
 
 ## 五、搜索设计
 
-### 5.1 Elasticsearch 索引结构
+### 5.1 方案选择
 
-```json
-{
-  "mappings": {
-    "properties": {
-      "id":           { "type": "keyword" },
-      "title":        { "type": "text", "analyzer": "ik_max_word" },
-      "summary":      { "type": "text", "analyzer": "ik_max_word" },
-      "content":      { "type": "text", "analyzer": "ik_max_word" },
-      "category":     { "type": "keyword" },
-      "sub_category": { "type": "keyword" },
-      "tags":         { "type": "keyword" },
-      "author_name":  { "type": "keyword" },
-      "view_count":   { "type": "integer" },
-      "like_count":   { "type": "integer" },
-      "published_at": { "type": "date" }
-    }
-  }
-}
-```
+MVP 阶段使用 **PostgreSQL 内置全文搜索**（pg_trgm + tsvector），不引入 Elasticsearch。
 
-分词器使用 **IK 中文分词**（ik_max_word 索引，ik_smart 搜索）。
+理由：
+- 32G 单机部署，减少服务数量降低运维复杂度
+- pg_trgm 支持模糊匹配，tsvector 支持权重排序，满足 MVP 需求
+- 数据量达到百万级或搜索体验明显不足时，再迁移到 ES
 
-### 5.2 搜索查询逻辑
+### 5.2 搜索查询实现
 
 ```python
-def search_articles(keyword, category=None, tags=None, sort="relevance"):
-    query = {
-        "bool": {
-            "must": [
-                {
-                    "multi_match": {
-                        "query": keyword,
-                        "fields": ["title^3", "summary^2", "content"],
-                        "type": "best_fields"
-                    }
-                }
-            ],
-            "filter": []
-        }
-    }
-    
-    if category:
-        query["bool"]["filter"].append({"term": {"category": category}})
-    if tags:
-        query["bool"]["filter"].append({"terms": {"tags": tags}})
-    
-    # 排序：相关度 or 热度（view+like加权）
-    ...
+async def search_articles(
+    keyword: str,
+    category: str = None,
+    tags: list = None,
+    page: int = 1,
+    page_size: int = 20
+):
+    # 全文搜索（tsvector）
+    query = """
+        SELECT *, ts_rank(search_vector, query) AS rank
+        FROM articles, plainto_tsquery('simple', :keyword) query
+        WHERE search_vector @@ query
+          AND status = 'published'
+        ORDER BY rank DESC
+        LIMIT :limit OFFSET :offset
+    """
+    # 模糊搜索兜底（pg_trgm，处理拼写错误/部分匹配）
+    fallback_query = """
+        SELECT * FROM articles
+        WHERE title % :keyword AND status = 'published'
+        ORDER BY similarity(title, :keyword) DESC
+        LIMIT :limit OFFSET :offset
+    """
 ```
 
-### 5.3 数据同步
+### 5.3 搜索性能预期
 
-PostgreSQL → Elasticsearch 同步方案：
-- **写入时双写**：文章发布/更新时同步写 ES
-- **定时全量同步**：每天凌晨全量重建索引（兜底）
+| 数据量 | 查询响应时间（预估） |
+|--------|---------------------|
+| 1 万篇 | < 50ms |
+| 10 万篇 | < 200ms |
+| 100 万篇 | 考虑迁移 ES |
 
 ---
 
@@ -442,7 +468,7 @@ PostgreSQL → Elasticsearch 同步方案：
 /category/[slug]        分类页
 /tag/[name]             标签页
 /search                 搜索结果页
-/write                  发布文章
+/write                  发布文章（UGC）
 /user/[id]              用户主页
 /me                     个人中心
 /me/articles            我的文章
@@ -463,38 +489,32 @@ components/
 ├── article/
 │   ├── ArticleCard.tsx     # 信息流卡片
 │   ├── ArticleList.tsx     # 无限滚动列表
-│   ├── ArticleDetail.tsx   # 文章详情（Markdown渲染）
-│   └── ArticleEditor.tsx   # 富文本/Markdown编辑器
+│   ├── ArticleDetail.tsx   # 文章详情（Markdown 渲染）
+│   └── ArticleEditor.tsx   # Markdown 编辑器
 ├── search/
 │   └── SearchBar.tsx       # 搜索框（带联想）
 └── common/
-    ├── TagList.tsx          # 标签组
+    ├── TagList.tsx
     └── UserAvatar.tsx
 ```
 
 ### 6.3 SEO 策略
 
-Next.js SSR 对 SEO 友好，关键配置：
+- Next.js SSR：文章详情页服务端渲染，对搜索引擎友好
+- ISR：热门文章每小时重新生成静态页
+- 动态生成 sitemap.xml
+- 结构化数据（JSON-LD Article schema）
 
 ```typescript
-// 文章详情页 generateMetadata
 export async function generateMetadata({ params }) {
   const article = await getArticle(params.id)
   return {
     title: `${article.title} | OfferHub`,
     description: article.summary,
-    openGraph: {
-      title: article.title,
-      description: article.summary,
-      type: "article",
-    },
+    openGraph: { title: article.title, description: article.summary, type: "article" },
   }
 }
 ```
-
-- 静态生成热门文章（ISR，每小时重新生成）
-- 动态生成 sitemap.xml
-- 结构化数据（JSON-LD Article schema）
 
 ---
 
@@ -512,49 +532,25 @@ export async function generateMetadata({ params }) {
 
 ### 7.2 内容安全
 
-- XSS：Markdown 渲染时过滤危险 HTML 标签（使用 DOMPurify）
+- XSS：Markdown 渲染时过滤危险 HTML 标签（DOMPurify）
 - SQL 注入：全程 ORM（SQLAlchemy），禁止拼接 SQL
-- 文件上传：限制类型（jpg/png/gif/webp），限制大小（5MB），存 OSS 不落本地
+- 文件上传：限制类型（jpg/png/gif/webp），限制大小（5MB）
 - 敏感词过滤：内容发布时过滤违规词
 
 ### 7.3 接口安全
 
-- 登录接口：限流 5次/分钟/IP
-- 发布接口：限流 10篇/天/用户
-- 爬虫接口：仅内网访问
+- 登录接口：限流 5 次/分钟/IP
+- 发布接口：限流 10 篇/天/用户
+- 采集管理接口：仅内网或管理员访问
 
 ---
 
-## 八、待讨论问题
+## 八、待决策事项
 
-以下几个设计点需要和你确认方向：
-
-**1. 技术栈选择**
-- 后端：Python FastAPI vs Java Spring Boot？
-  - FastAPI：与爬虫/AI 生态天然契合，开发快
-  - Spring Boot：生态成熟，面试鸭同款，更多贡献者熟悉
-- 你的偏好？
-
-**2. 采集优先级**
-- MVP 阶段先做哪个数据源？
-  - 方案A：先做 UGC（用户投稿），0 爬虫风险，但冷启动难
-  - 方案B：先做 GitHub/Gitee API 采集，内容快速丰富，合规风险低
-  - 方案C：两者并行
-
-**3. AI 功能时机**
-- AI 摘要生成（采集时自动生成）是 MVP 必须的吗？
-  - 有了摘要，信息流体验更好
-  - 但增加了 LLM API 成本和复杂度
-  - 建议：MVP 先用文章前200字作摘要，后续再接 AI
-
-**4. 内容审核机制**
-- 用户投稿是否需要先审后发？
-  - 先审后发：内容质量有保障，但运营压力大
-  - 先发后审：冷启动友好，但可能出现违规内容
-  - 建议：新用户先审后发，老用户（积分>100）直接发布
-
-**5. 部署方案**
-- 初期服务器预算？
-  - 轻量云服务器（2C4G）：够跑 MVP，约 ¥100/月
-  - 需要 Elasticsearch，建议至少 4G 内存
-  - 或者先用托管 ES 服务（成本高但省心）
+| 事项 | 当前状态 | 说明 |
+|------|----------|------|
+| 图片/附件存储 | 待定 | OSS（阿里云/MinIO 自建）二选一，MVP 可先不支持图片上传 |
+| 中文分词扩展 | 待定 | zhparser vs pg_jieba，需在 Docker 镜像中预装 |
+| UGC 审核机制 | 已定 | 新用户先审后发，积分 > 100 免审 |
+| AI 摘要 | 后置 | MVP 用正文前 200 字，后续接 LLM API |
+| 搜索升级时机 | 后置 | 内容量超 100 万或搜索体验明显不足时迁移 ES |
