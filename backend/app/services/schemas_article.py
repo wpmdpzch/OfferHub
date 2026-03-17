@@ -46,6 +46,7 @@ class ArticleListItem(BaseModel):
     author: AuthorOut
     source_url: str | None
     source_type: str
+    status: str
     view_count: int
     like_count: int
     collect_count: int

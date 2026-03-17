@@ -1,8 +1,9 @@
 import enum
+import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -27,7 +28,7 @@ class CrawlSource(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    type: Mapped[CrawlSourceType] = mapped_column(Enum(CrawlSourceType), nullable=False)
+    type: Mapped[CrawlSourceType] = mapped_column(Enum(CrawlSourceType, name="crawl_source_type"), nullable=False)
     url: Mapped[str] = mapped_column(Text, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     crawl_interval: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
@@ -38,13 +39,9 @@ class CrawlSource(Base):
 class CrawlTask(Base):
     __tablename__ = "crawl_tasks"
 
-    import uuid as _uuid
-    from sqlalchemy.dialects.postgresql import UUID as _UUID
-    from sqlalchemy import ForeignKey as _FK
-
-    id: Mapped[_uuid.UUID] = mapped_column(_UUID(as_uuid=True), primary_key=True, default=_uuid.uuid4)
-    source_id: Mapped[int] = mapped_column(Integer, _FK("crawl_sources.id", ondelete="CASCADE"), nullable=False)
-    status: Mapped[CrawlTaskStatus] = mapped_column(Enum(CrawlTaskStatus), nullable=False, default=CrawlTaskStatus.pending)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[int] = mapped_column(Integer, ForeignKey("crawl_sources.id", ondelete="CASCADE"), nullable=False)
+    status: Mapped[CrawlTaskStatus] = mapped_column(Enum(CrawlTaskStatus, name="crawl_task_status"), nullable=False, default=CrawlTaskStatus.pending)
     items_found: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     items_saved: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_msg: Mapped[str | None] = mapped_column(Text)

@@ -2,17 +2,41 @@ import uuid
 from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.deps import CurrentUser
 from app.core.response import Response, ok
+from app.core.security import decode_token
 from app.models.social import BehaviorType
+from app.models.user import User
 from app.services import article_service, comment_service
 from app.services.schemas_article import ArticleCreate, ArticleUpdate
 from app.services.schemas_comment import CommentCreate
 
 router = APIRouter()
+
+_optional_bearer = HTTPBearer(auto_error=False)
+
+
+async def get_optional_user(
+    credentials: Annotated[Optional[HTTPAuthorizationCredentials], Depends(_optional_bearer)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Optional[User]:
+    if not credentials:
+        return None
+    try:
+        from jose import JWTError
+        from sqlalchemy import select
+        payload = decode_token(credentials.credentials)
+        user_id = payload.get("sub")
+        if not user_id:
+            return None
+        result = await db.execute(select(User).where(User.id == user_id))
+        return result.scalar_one_or_none()
+    except Exception:
+        return None
 
 
 @router.get("/articles", response_model=Response)
@@ -57,7 +81,7 @@ async def search(
 async def get_article(
     article_id: uuid.UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Optional[CurrentUser] = None,
+    current_user: Annotated[Optional[User], Depends(get_optional_user)] = None,
 ):
     viewer_id = current_user.id if current_user else None
     article = await article_service.get_article(db, article_id, viewer_id)

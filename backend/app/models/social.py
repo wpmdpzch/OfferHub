@@ -43,7 +43,7 @@ class UserBehavior(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     article_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("articles.id", ondelete="CASCADE"), nullable=False)
-    behavior: Mapped[BehaviorType] = mapped_column(Enum(BehaviorType), nullable=False)
+    behavior: Mapped[BehaviorType] = mapped_column(Enum(BehaviorType, name="behavior_type"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
