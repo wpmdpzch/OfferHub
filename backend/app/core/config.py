@@ -25,6 +25,9 @@ class Settings(BaseSettings):
 
     github_token: str = ""
 
+    # 投稿审核开关：False = 直接发布，True = 进入 pending 等待审核
+    review_enabled: bool = False
+
     @property
     def database_url(self) -> str:
         return (

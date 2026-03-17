@@ -3,10 +3,16 @@ import type { ArticleListOut } from "@/types";
 import ArticleCard from "@/components/article/ArticleCard";
 import Header from "@/components/layout/Header";
 import Sidebar from "@/components/layout/Sidebar";
+import type { Metadata } from "next";
 
 interface Props {
   params: { slug: string };
   searchParams: { page?: string };
+}
+
+export async function generateMetadata({ params }: Props): Promise<Metadata> {
+  const category = decodeURIComponent(params.slug);
+  return { title: category, description: `OfferHub ${category}分类下的面试题和面经` };
 }
 
 export default async function CategoryPage({ params, searchParams }: Props) {

@@ -2,9 +2,17 @@ import { api } from "@/lib/api";
 import type { ArticleListOut } from "@/types";
 import ArticleCard from "@/components/article/ArticleCard";
 import Header from "@/components/layout/Header";
+import type { Metadata } from "next";
 
 interface Props {
   searchParams: { q?: string; page?: string };
+}
+
+export async function generateMetadata({ searchParams }: Props): Promise<Metadata> {
+  const q = searchParams.q ?? "";
+  return q
+    ? { title: `"${q}" 搜索结果`, description: `OfferHub 搜索「${q}」的面试题和面经` }
+    : { title: "搜索面试题" };
 }
 
 export default async function SearchPage({ searchParams }: Props) {

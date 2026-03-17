@@ -1,4 +1,5 @@
 import Link from "next/link";
+import HeaderNav from "./HeaderNav";
 
 export default function Header() {
   return (
@@ -20,10 +21,7 @@ export default function Header() {
             搜索
           </button>
         </form>
-        <nav className="flex items-center gap-4 text-sm">
-          <Link href="/write" className="text-gray-600 hover:text-blue-600">投稿</Link>
-          <Link href="/me" className="text-gray-600 hover:text-blue-600">我的</Link>
-        </nav>
+        <HeaderNav />
       </div>
     </header>
   );

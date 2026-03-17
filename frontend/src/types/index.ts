@@ -19,11 +19,13 @@ export interface ArticleListItem {
   author: Author;
   source_url: string | null;
   source_type: string;
+  status: string;
   view_count: number;
   like_count: number;
   collect_count: number;
   comment_count: number;
   published_at: string | null;
+  created_at: string;
 }
 
 export interface ArticleDetail extends ArticleListItem {

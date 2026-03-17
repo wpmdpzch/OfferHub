@@ -1,5 +1,8 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
 
+// 客户端组件（浏览器）用相对路径，走 nginx 代理
+export const CLIENT_API = "/api/v1";
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     headers: { "Content-Type": "application/json", ...init?.headers },

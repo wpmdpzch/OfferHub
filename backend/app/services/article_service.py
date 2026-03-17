@@ -120,10 +120,15 @@ async def get_article(
 
 
 async def create_article(db: AsyncSession, author: User, data: ArticleCreate) -> ArticleDetail:
-    # 积分 > 100 免审
-    initial_status = ArticleStatus.published if author.points > 100 else ArticleStatus.pending
-    published_at = datetime.now(timezone.utc) if initial_status == ArticleStatus.published else None
-    summary = data.content[:200] if data.content else None
+    from app.core.config import settings
+    # REVIEW_ENABLED=false 时直接发布；true 时进入 pending 等待审核
+    if settings.review_enabled:
+        initial_status = ArticleStatus.pending
+        published_at = None
+    else:
+        initial_status = ArticleStatus.published
+        published_at = datetime.now(timezone.utc)
+    summary = data.summary or (data.content[:200] if data.content else None)
 
     article = Article(
         title=data.title,

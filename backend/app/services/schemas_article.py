@@ -22,6 +22,7 @@ class TagOut(BaseModel):
 class ArticleCreate(BaseModel):
     title: str
     content: str
+    summary: str | None = None
     category: str | None = None
     sub_category: str | None = None
     tag_names: list[str] = []
