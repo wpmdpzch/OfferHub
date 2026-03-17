@@ -2,7 +2,11 @@
 const nextConfig = {
   output: "standalone",
   images: {
-    remotePatterns: [{ protocol: "https", hostname: "**" }],
+    // SSRF 防护：收窄图片域名白名单，禁止通配符 hostname
+    remotePatterns: [
+      { protocol: "https", hostname: "avatars.githubusercontent.com" },
+      { protocol: "https", hostname: "github.com" },
+    ],
   },
 };
 

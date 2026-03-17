@@ -23,7 +23,7 @@ async def main():
         # 采集所有启用的 GitHub 源
         result = await db.execute(
             select(CrawlSource).where(
-                CrawlSource.enabled == True,
+                CrawlSource.enabled.is_(True),
                 CrawlSource.type == CrawlSourceType.github,
             )
         )
@@ -41,7 +41,7 @@ async def main():
         # 采集所有 RSS 源
         result = await db.execute(
             select(CrawlSource).where(
-                CrawlSource.enabled == True,
+                CrawlSource.enabled.is_(True),
                 CrawlSource.type == CrawlSourceType.rss,
             )
         )

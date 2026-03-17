@@ -48,12 +48,12 @@ async def login(db: AsyncSession, data: UserLogin) -> TokenOut:
 
 
 async def refresh_tokens(db: AsyncSession, refresh_token: str) -> TokenOut:
-    from jose import JWTError
+    from jwt import InvalidTokenError
     try:
         payload = decode_token(refresh_token)
         user_id: str = payload["sub"]
         jti: str = payload["jti"]
-    except (JWTError, KeyError):
+    except (InvalidTokenError, KeyError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
 
     from app.core.redis import redis_client
@@ -73,12 +73,12 @@ async def refresh_tokens(db: AsyncSession, refresh_token: str) -> TokenOut:
 
 
 async def logout(user_id: str, refresh_token: str) -> None:
-    from jose import JWTError
+    from jwt import InvalidTokenError
     try:
         payload = decode_token(refresh_token)
         jti: str = payload["jti"]
         await revoke_refresh_token(user_id, jti)
-    except (JWTError, KeyError):
+    except (InvalidTokenError, KeyError):
         pass  # token 已过期或无效，忽略
 
 

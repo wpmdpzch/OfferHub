@@ -8,13 +8,15 @@ class Settings(BaseSettings):
     postgres_port: int = 5432
     postgres_db: str = "offerhub"
     postgres_user: str = "offerhub"
-    postgres_password: str = "changeme"
+    # 无默认值：必须通过环境变量注入，防止硬编码凭证（CWE-798）
+    postgres_password: str
 
     redis_host: str = "localhost"
     redis_port: int = 6379
     redis_db: int = 0
 
-    jwt_secret_key: str = "changeme"
+    # 无默认值：必须通过环境变量注入
+    jwt_secret_key: str
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 120
     refresh_token_expire_days: int = 7

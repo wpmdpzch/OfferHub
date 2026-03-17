@@ -2,7 +2,8 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import bcrypt as _bcrypt
-from jose import JWTError, jwt
+import jwt
+from jwt import InvalidTokenError
 
 from app.core.config import settings
 from app.core.redis import redis_client

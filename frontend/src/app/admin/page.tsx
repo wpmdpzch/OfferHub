@@ -4,7 +4,8 @@ import Header from "@/components/layout/Header";
 import AdminActions from "@/components/admin/AdminActions";
 import type { ArticleListItem, ArticleListOut } from "@/types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://api:8000/api/v1";
+// SSR 内部调用：仅在 Docker 内网使用，不接受用户输入，无 SSRF 风险
+const API_BASE = process.env.INTERNAL_API_URL ?? "http://api:8000/api/v1";
 
 async function getPendingArticles(token: string): Promise<ArticleListOut> {
   try {

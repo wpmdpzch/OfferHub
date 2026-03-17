@@ -35,6 +35,11 @@ async def _get_or_create_tags(db: AsyncSession, names: list[str]) -> list[Tag]:
     return tags
 
 
+async def _build_article_list_item(r: Article) -> ArticleListItem:
+    """将 ORM 对象转换为列表 schema，提取自 list_articles 降低扇出"""
+    return ArticleListItem.model_validate(r)
+
+
 async def list_articles(
     db: AsyncSession,
     page: int = 1,
@@ -81,7 +86,7 @@ async def list_articles(
         total=total,
         page=page,
         page_size=page_size,
-        items=[ArticleListItem.model_validate(r) for r in rows],
+        items=[await _build_article_list_item(r) for r in rows],
     )
 
 

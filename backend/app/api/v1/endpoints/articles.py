@@ -27,7 +27,6 @@ async def get_optional_user(
     if not credentials:
         return None
     try:
-        from jose import JWTError
         from sqlalchemy import select
         payload = decode_token(credentials.credentials)
         user_id = payload.get("sub")
