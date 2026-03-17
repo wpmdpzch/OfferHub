@@ -549,7 +549,7 @@ export async function generateMetadata({ params }) {
 
 | 事项 | 当前状态 | 说明 |
 |------|----------|------|
-| 图片/附件存储 | 待定 | OSS（阿里云/MinIO 自建）二选一，MVP 可先不支持图片上传 |
+| 图片/附件存储 | **已决策：暂不支持** | MVP 阶段不支持用户上传图片/附件；采集内容中的图片直接引用原始 URL |
 | 中文分词扩展 | 待定 | zhparser vs pg_jieba，需在 Docker 镜像中预装 |
 | UGC 审核机制 | 已定 | 新用户先审后发，积分 > 100 免审 |
 | AI 摘要 | 后置 | MVP 用正文前 200 字，后续接 LLM API |
