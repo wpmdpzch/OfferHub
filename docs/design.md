@@ -1,6 +1,6 @@
 # OfferHub 系统设计文档 v1.1
 
-> 版本：v1.1 | 更新时间：2026-03-17 | 状态：讨论中
+> 版本：v1.2 | 更新时间：2026-03-17 | 状态：已定稿
 
 ---
 
@@ -51,7 +51,7 @@ services:
   web:        # Next.js 前端（port 3000）
   api:        # FastAPI 后端（port 8000）
   worker:     # Scrapy 采集 Worker
-  postgres:   # PostgreSQL 主库（port 5432）
+  postgres:   # PostgreSQL 主库（port 5432），镜像见 2.5 节
   redis:      # Redis 缓存+队列（port 6379）
   nginx:      # 反向代理（port 80/443）
 ```
@@ -162,8 +162,23 @@ crawl_sources ──────< crawl_tasks >────── articles
 | items_found | INT | 发现条目数 |
 | items_saved | INT | 入库条目数 |
 | error_msg | TEXT | 错误信息 |
+| retry_count | INT DEFAULT 0 | 已重试次数 |
 | started_at | TIMESTAMPTZ | 开始时间 |
 | finished_at | TIMESTAMPTZ | 结束时间 |
+
+**user_behaviors（用户行为记录表）**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | BIGSERIAL PK | 行为ID（高频写入用 BIGSERIAL） |
+| user_id | UUID FK → users | 用户 |
+| article_id | UUID FK → articles | 目标文章 |
+| behavior | ENUM(view, like, collect, report) | 行为类型 |
+| created_at | TIMESTAMPTZ DEFAULT now() | 发生时间 |
+
+> 唯一约束：`UNIQUE(user_id, article_id, behavior)`，防止重复点赞/收藏。
+> 浏览行为（view）不受唯一约束限制，用于统计 PV；点赞/收藏受约束，保证幂等。
+> articles 表的 `like_count`/`collect_count`/`view_count` 为冗余计数字段，通过触发器或异步任务从 user_behaviors 聚合更新，避免每次查询实时 COUNT。
 
 ### 2.3 索引策略
 
@@ -180,19 +195,31 @@ CREATE INDEX idx_articles_search ON articles USING GIN(search_vector);
 -- URL 去重索引
 CREATE UNIQUE INDEX idx_articles_source_url ON articles(source_url)
     WHERE source_url IS NOT NULL;
+
+-- user_behaviors 索引
+CREATE UNIQUE INDEX idx_behaviors_unique ON user_behaviors(user_id, article_id, behavior)
+    WHERE behavior IN ('like', 'collect', 'report');
+CREATE INDEX idx_behaviors_article ON user_behaviors(article_id, behavior);
+CREATE INDEX idx_behaviors_user ON user_behaviors(user_id, behavior, created_at DESC);
 ```
 
 ### 2.4 全文搜索向量维护
 
 ```sql
+-- 启用 zhparser 扩展（容器启动时执行一次）
+CREATE EXTENSION IF NOT EXISTS zhparser;
+CREATE TEXT SEARCH CONFIGURATION chinese (PARSER = zhparser);
+ALTER TEXT SEARCH CONFIGURATION chinese
+    ADD MAPPING FOR n, v, a, i, e, l WITH simple;
+
 -- 自动更新 search_vector（触发器）
 CREATE OR REPLACE FUNCTION update_search_vector()
 RETURNS TRIGGER AS $$
 BEGIN
   NEW.search_vector :=
-    setweight(to_tsvector('simple', coalesce(NEW.title, '')), 'A') ||
-    setweight(to_tsvector('simple', coalesce(NEW.summary, '')), 'B') ||
-    setweight(to_tsvector('simple', coalesce(NEW.content, '')), 'C');
+    setweight(to_tsvector('chinese', coalesce(NEW.title, '')), 'A') ||
+    setweight(to_tsvector('chinese', coalesce(NEW.summary, '')), 'B') ||
+    setweight(to_tsvector('chinese', coalesce(NEW.content, '')), 'C');
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -202,7 +229,30 @@ CREATE TRIGGER articles_search_vector_update
   FOR EACH ROW EXECUTE FUNCTION update_search_vector();
 ```
 
-> 中文分词：使用 `zhparser` 扩展（PostgreSQL 中文分词插件），Docker 镜像中预装。
+### 2.5 PostgreSQL 镜像选型
+
+**决策：使用 `abcfy2/zhparser` 作为基础镜像。**
+
+| 方案 | 镜像 | 说明 |
+|------|------|------|
+| ✅ 选用 | `abcfy2/zhparser:14` | 基于 PostgreSQL 14，预装 zhparser + SCWS 分词词典，开箱即用 |
+| 备选 | 官方镜像 + 手动编译 | 需要在 Dockerfile 中编译 zhparser，构建时间长，维护成本高 |
+| 放弃 | pg_jieba | 依赖 jieba C++ 库，Docker 镜像更难维护，社区活跃度低于 zhparser |
+
+```yaml
+# docker-compose.yml 中 postgres 服务
+postgres:
+  image: abcfy2/zhparser:14
+  environment:
+    POSTGRES_DB: offerhub
+    POSTGRES_USER: ${POSTGRES_USER}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  volumes:
+    - postgres_data:/var/lib/postgresql/data
+    - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+```
+
+> `init.sql` 在容器首次启动时自动执行，负责创建扩展、配置分词器、建表、建索引。
 
 ---
 
@@ -233,9 +283,12 @@ CREATE TRIGGER articles_search_vector_update
 | POST | `/articles` | 发布文章（UGC） | 是 |
 | PUT | `/articles/{id}` | 编辑文章 | 是（本人/管理员） |
 | DELETE | `/articles/{id}` | 删除文章 | 是（本人/管理员） |
-| GET | `/articles/search` | 全文搜索（pg_trgm） | 否 |
-| POST | `/articles/{id}/like` | 点赞 | 是 |
-| POST | `/articles/{id}/collect` | 收藏 | 是 |
+| GET | `/search` | 全文搜索（zhparser + pg_trgm） | 否 |
+| POST | `/articles/{id}/like` | 点赞（幂等） | 是 |
+| DELETE | `/articles/{id}/like` | 取消点赞 | 是 |
+| POST | `/articles/{id}/collect` | 收藏（幂等） | 是 |
+| DELETE | `/articles/{id}/collect` | 取消收藏 | 是 |
+| POST | `/articles/{id}/report` | 举报 | 是 |
 
 **用户接口**
 
@@ -260,12 +313,15 @@ CREATE TRIGGER articles_search_vector_update
 
 | 方法 | 路径 | 说明 | 认证 |
 |------|------|------|------|
-| GET | `/admin/articles/pending` | 待审核文章 | 管理员 |
-| POST | `/admin/articles/{id}/approve` | 审核通过 | 管理员 |
-| POST | `/admin/articles/{id}/reject` | 审核拒绝 | 管理员 |
-| GET | `/admin/crawl/sources` | 采集源列表 | 管理员 |
-| POST | `/admin/crawl/sources` | 新增采集源 | 管理员 |
-| POST | `/admin/crawl/trigger` | 手动触发采集 | 管理员 |
+| GET | `/admin/articles/pending` | 待审核文章 | editor/admin |
+| POST | `/admin/articles/{id}/approve` | 审核通过 | editor/admin |
+| POST | `/admin/articles/{id}/reject` | 审核拒绝 | editor/admin |
+| GET | `/admin/tags` | 标签列表管理 | editor/admin |
+| POST | `/admin/tags` | 新增标签 | editor/admin |
+| DELETE | `/admin/tags/{id}` | 删除标签 | editor/admin |
+| GET | `/admin/crawl/sources` | 采集源列表 | admin |
+| POST | `/admin/crawl/sources` | 新增采集源 | admin |
+| POST | `/admin/crawl/trigger` | 手动触发采集 | admin |
 
 ### 3.3 文章列表接口详细设计
 
@@ -305,6 +361,69 @@ Response:
   }
 }
 ```
+
+### 3.4 文章详情接口响应体
+
+```
+GET /api/v1/articles/{id}
+
+Response:
+{
+  "code": 0,
+  "data": {
+    "id": "...",
+    "title": "...",
+    "content": "...",        // Markdown 全文
+    "summary": "...",
+    "category": "面经分享",
+    "sub_category": "大厂",
+    "tags": ["前端", "字节"],
+    "author": { "id": "...", "username": "张三", "avatar": "..." },
+    "source_url": "https://...",
+    "source_type": "ugc",
+    "source_license": "MIT",
+    "view_count": 1200,
+    "like_count": 856,
+    "collect_count": 120,
+    "comment_count": 34,
+    "viewer_liked": false,      // 当前登录用户是否已点赞（未登录为 null）
+    "viewer_collected": false,  // 当前登录用户是否已收藏（未登录为 null）
+    "published_at": "2026-03-17T10:00:00Z",
+    "updated_at": "2026-03-17T12:00:00Z"
+  }
+}
+```
+
+### 3.5 搜索接口详细设计
+
+```
+GET /api/v1/search
+
+Query Params:
+  q           string  必填，搜索关键词
+  page        int     default=1
+  page_size   int     default=20, max=50
+  category    string  可选，一级分类过滤
+  tag         string  可选，标签过滤
+
+Response: 同文章列表接口，items 额外包含 highlight 字段
+{
+  "code": 0,
+  "data": {
+    "total": 100,
+    "page": 1,
+    "page_size": 20,
+    "items": [
+      {
+        ...文章列表字段...,
+        "highlight": "...命中关键词的<em>摘要片段</em>..."
+      }
+    ]
+  }
+}
+```
+
+搜索策略：优先 tsvector 全文检索（zhparser 中文分词），无结果时降级到 pg_trgm 模糊匹配兜底。
 
 ---
 
@@ -430,16 +549,16 @@ async def search_articles(
     page: int = 1,
     page_size: int = 20
 ):
-    # 全文搜索（tsvector）
+    # 主路径：zhparser 中文全文搜索（tsvector）
     query = """
         SELECT *, ts_rank(search_vector, query) AS rank
-        FROM articles, plainto_tsquery('simple', :keyword) query
+        FROM articles, plainto_tsquery('chinese', :keyword) query
         WHERE search_vector @@ query
           AND status = 'published'
         ORDER BY rank DESC
         LIMIT :limit OFFSET :offset
     """
-    # 模糊搜索兜底（pg_trgm，处理拼写错误/部分匹配）
+    # 降级兜底：pg_trgm 模糊匹配（处理英文/拼写错误/部分匹配）
     fallback_query = """
         SELECT * FROM articles
         WHERE title % :keyword AND status = 'published'
@@ -525,16 +644,23 @@ export async function generateMetadata({ params }) {
 ```
 认证：JWT（Access Token 2h + Refresh Token 7d）
 授权：RBAC 三角色
-  - user：发布/编辑自己的文章，评论，点赞收藏
-  - editor：审核内容，管理标签
-  - admin：全部权限 + 采集管理
+  - user：发布/编辑自己的文章，评论，点赞/取消点赞，收藏/取消收藏，举报
+  - editor：user 全部权限 + 审核内容 + 管理标签
+  - admin：全部权限 + 采集管理 + 用户管理
 ```
+
+**Refresh Token 存储与吊销：**
+
+- Refresh Token 存储在 Redis，key 为 `refresh_token:{user_id}:{jti}`，TTL 7天
+- 用户登出时删除对应 Redis key，实现即时吊销
+- 用户修改密码时删除该用户所有 `refresh_token:{user_id}:*`，强制全端重新登录
+- Access Token 无状态，依赖短过期时间（2h）自然失效；如需提前吊销，维护 Redis 黑名单 `token_blacklist:{jti}`
 
 ### 7.2 内容安全
 
 - XSS：Markdown 渲染时过滤危险 HTML 标签（DOMPurify）
 - SQL 注入：全程 ORM（SQLAlchemy），禁止拼接 SQL
-- 文件上传：限制类型（jpg/png/gif/webp），限制大小（5MB）
+- 文件上传：MVP 阶段不支持，后续限制类型（jpg/png/gif/webp）和大小（5MB）
 - 敏感词过滤：内容发布时过滤违规词
 
 ### 7.3 接口安全
@@ -550,7 +676,21 @@ export async function generateMetadata({ params }) {
 | 事项 | 当前状态 | 说明 |
 |------|----------|------|
 | 图片/附件存储 | **已决策：暂不支持** | MVP 阶段不支持用户上传图片/附件；采集内容中的图片直接引用原始 URL |
-| 中文分词扩展 | 待定 | zhparser vs pg_jieba，需在 Docker 镜像中预装 |
+| 中文分词扩展 | **已决策：zhparser** | 使用 `abcfy2/zhparser:14` 镜像，见 2.5 节 |
 | UGC 审核机制 | 已定 | 新用户先审后发，积分 > 100 免审 |
 | AI 摘要 | 后置 | MVP 用正文前 200 字，后续接 LLM API |
 | 搜索升级时机 | 后置 | 内容量超 100 万或搜索体验明显不足时迁移 ES |
+| 积分规则 | **已定** | 见下方积分体系说明 |
+
+### 积分体系
+
+| 行为 | 积分变化 | 说明 |
+|------|----------|------|
+| 注册 | +10 | 一次性 |
+| 发布文章（审核通过） | +5 | 每篇 |
+| 文章被点赞 | +1 | 每次，上限 50/篇 |
+| 文章被收藏 | +2 | 每次，上限 20/篇 |
+| 每日登录 | +1 | 每天首次 |
+| 文章被举报并核实违规 | -10 | 扣分 |
+
+积分 > 100 的用户发布文章免审核（直接 published 状态）。积分存储在 users.points，变更通过后端服务异步写入，不在请求链路中同步计算。
