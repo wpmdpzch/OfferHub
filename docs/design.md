@@ -1,6 +1,6 @@
 # OfferHub 系统设计文档 v1.1
 
-> 版本：v1.2 | 更新时间：2026-03-17 | 状态：已定稿
+> 版本：v1.3 | 更新时间：2026-03-17 | 状态：已定稿
 
 ---
 
@@ -177,8 +177,22 @@ crawl_sources ──────< crawl_tasks >────── articles
 | created_at | TIMESTAMPTZ DEFAULT now() | 发生时间 |
 
 > 唯一约束：`UNIQUE(user_id, article_id, behavior)`，防止重复点赞/收藏。
-> 浏览行为（view）不受唯一约束限制，用于统计 PV；点赞/收藏受约束，保证幂等。
+> 浏览行为（view）不受唯一约束限制；点赞/收藏/举报受约束，保证幂等。
 > articles 表的 `like_count`/`collect_count`/`view_count` 为冗余计数字段，通过触发器或异步任务从 user_behaviors 聚合更新，避免每次查询实时 COUNT。
+> **浏览行为写入方案（已决策）**：用户浏览时写 Redis `INCR article:view:{article_id}`，异步 Worker 每 5 分钟同步到 `articles.view_count`；同时异步写入 user_behaviors（behavior='view'），用于后续 P2 个性化推荐。
+
+**举报处理流程（已决策）**：`POST /articles/{id}/report` 写入 user_behaviors 后，将文章状态置为 `pending` 进入待审核队列，由 editor/admin 人工处理。MVP 阶段不做自动化阈值触发，不通知被举报者，举报人不可见举报内容。
+
+**point_logs（积分流水表，P1）**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | UUID PK | 流水ID |
+| user_id | UUID FK → users | 用户 |
+| delta | INT | 积分变化（正数加分，负数扣分） |
+| reason | VARCHAR(100) | 原因：register/publish/liked/collected/daily_login/violation |
+| ref_id | UUID nullable | 关联文章/评论 ID |
+| created_at | TIMESTAMPTZ DEFAULT now() | 发生时间 |
 
 ### 2.3 索引策略
 
@@ -335,7 +349,7 @@ Query Params:
   sub_cat     string  二级分类
   tag         string  标签名
   sort        string  latest|hot|recommend  default=latest
-  keyword     string  关键词（走 pg_trgm 全文搜索）
+  keyword     string  关键词（标题 LIKE 过滤，非全文检索；全文检索请用 GET /search）
 
 Response:
 {
@@ -667,6 +681,7 @@ export async function generateMetadata({ params }) {
 
 - 登录接口：限流 5 次/分钟/IP
 - 发布接口：限流 10 篇/天/用户
+- 评论接口：限流 20 条/天/用户
 - 采集管理接口：仅内网或管理员访问
 
 ---
@@ -681,6 +696,10 @@ export async function generateMetadata({ params }) {
 | AI 摘要 | 后置 | MVP 用正文前 200 字，后续接 LLM API |
 | 搜索升级时机 | 后置 | 内容量超 100 万或搜索体验明显不足时迁移 ES |
 | 积分规则 | **已定** | 见下方积分体系说明 |
+| point_logs 表 | **P1 纳入** | 积分流水表，见 2.2 节 |
+| 浏览行为写入 | **已决策** | Redis INCR + 异步 Worker 落库，见 2.2 节 user_behaviors 说明 |
+| 种子采集方式 | **已决策** | 独立 `scripts/seed_crawl.py` 脚本，一次性执行，不走 APScheduler |
+| 评论点赞 | 后置 P2 | user_behaviors 后续扩展 target_type 字段区分 article/comment |
 
 ### 积分体系
 
