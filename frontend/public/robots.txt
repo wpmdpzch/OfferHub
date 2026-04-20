@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+
+# Disallow API paths
+Disallow: /api/
+
+# Sitemap
+Sitemap: https://offerhub.vercel.app/sitemap.xml

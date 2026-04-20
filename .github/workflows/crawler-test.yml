@@ -1,0 +1,41 @@
+name: Crawler Test
+
+on:
+  push:
+    branches: [main]
+    paths: ['crawler/**']
+  pull_request:
+    branches: [main]
+    paths: ['crawler/**']
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-crawler-${{ hashFiles('crawler/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-crawler-
+
+      - name: Install dependencies
+        run: |
+          pip install -r crawler/requirements.txt
+
+      - name: Syntax check
+        run: |
+          python -m py_compile crawler/spiders/rss_spider.py
+          python -m py_compile crawler/spiders/github_spider.py
+          python -m py_compile crawler/worker/view_sync.py
+          python -m py_compile crawler/worker/crawl_runner.py
