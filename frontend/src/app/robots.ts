@@ -1,12 +1,11 @@
-import { MetadataRoute } from 'next';
+import { MetadataRoute } from "next";
 
 export default function robots(): MetadataRoute.Robots {
   return {
     rules: {
-      userAgent: '*',
-      allow: '/',
-      disallow: '/api/',
+      userAgent: "*",
+      allow: "/",
     },
-    sitemap: 'https://offerhub.vercel.app/sitemap.xml',
+    sitemap: "https://offerhub.dev/sitemap.xml",
   };
 }

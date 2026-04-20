@@ -1,8 +1,5 @@
+# https://www.robotstxt.org/robotstxt.html
 User-agent: *
 Allow: /
 
-# Disallow API paths
-Disallow: /api/
-
-# Sitemap
-Sitemap: https://offerhub.vercel.app/sitemap.xml
+Sitemap: https://offerhub.dev/sitemap.xml
