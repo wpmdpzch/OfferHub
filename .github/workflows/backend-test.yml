@@ -59,6 +59,19 @@ jobs:
           pip install -r backend/requirements.txt
           pip install pytest pytest-asyncio httpx
 
+      - name: Run unit tests
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_DB: offerhub_test
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+          JWT_SECRET_KEY: test-secret-key-for-ci-only
+        run: |
+          cd backend && python -m pytest tests/ -v
+
       - name: Run smoke tests
         env:
           POSTGRES_HOST: localhost
