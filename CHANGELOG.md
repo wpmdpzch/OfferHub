@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - README.md redesign: added badges, roadmap, feature table, improved structure
+- seed_crawl.py: add empty-source guard clause to skip crawl gracefully
+- smoke_test.py: refactor global `req()` into `TestRunner.req()` method for proper state encapsulation
 
 ### Security
 - SSRF protection in next.config.js (image domain whitelist)

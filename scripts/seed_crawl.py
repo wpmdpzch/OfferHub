@@ -29,6 +29,9 @@ async def main():
         )
         github_sources = result.scalars().all()
 
+        if not github_sources:
+            logger.info("No GitHub sources enabled, skipping GitHub crawl")
+
         for source in github_sources:
             logger.info(f"Seeding from GitHub source: {source.name}")
             from crawler.spiders.github_spider import crawl_github
