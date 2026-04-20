@@ -221,3 +221,7 @@ INSERT INTO crawl_sources (name, type, url, crawl_interval) VALUES
     ('阮一峰博客', 'rss', 'http://www.ruanyifeng.com/blog/atom.xml', 1440),
     ('美团技术团队', 'rss', 'https://tech.meituan.com/feed/', 720),
     ('InfoQ', 'rss', 'https://www.infoq.cn/feed', 120);
+
+-- 初始 GitHub 采集源（面试题仓库）
+INSERT INTO crawl_sources (name, type, url, crawl_interval, config) VALUES
+    ('GitHub 面试题聚合', 'github', 'https://github.com', 360, '{"query": "interview 面试 面经"}');
